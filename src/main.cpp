@@ -24,7 +24,7 @@ SHT2x sensor;
 Timer<1> timer;
 Configuration outputs("/outputs", debug);
 Configuration inputs("/inputs", debug);
-WifiConfig wifiConfig(WIFI_SSID, WIFI_PASSWORD, "ESP8266 Galeria-Hub", "galeria-hub", true, true, debug);
+WifiConfig wifiConfig(WIFI_SSID, WIFI_PASSWORD, "ESP8266 Galeria-Hub", "galeria-hub", AUTH_USER, AUTH_PASS, true, true, debug);
 
 IntConfig *leftLight;
 IntConfig *rightLight;
@@ -122,7 +122,7 @@ void setup() {
     return true;
   });
 
-  wifiConfig.registerConfigApi(outputs);
+  wifiConfig.registerConfigApi(outputs, NULL, false);
 
   wifiConfig.setupMQTT(
     MQTT_SERVER,
@@ -186,6 +186,8 @@ void serialCb(String cmd) {
     SavedConfiguration wc = wifiConfig.getConfig();
     wc.get("ssid")->setValue(WIFI_SSID);
     wc.get("password")->setValue(WIFI_PASSWORD);
+    wc.get("auth_user")->setValue(AUTH_USER);
+    wc.get("auth_pass")->setValue(AUTH_PASS);
     Serial.println("Resetting wifi settings");
   }
 }
