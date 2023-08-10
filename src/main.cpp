@@ -46,7 +46,9 @@ void setup() {
   pinMode(PIR_PIN, INPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(LEFT_LIGHT, OUTPUT);
+  digitalWrite(LEFT_LIGHT, HIGH);
   pinMode(RIGHT_LIGHT, OUTPUT);
+  digitalWrite(RIGHT_LIGHT, HIGH);
   pinMode(FAN_PIN, OUTPUT);
   wire.begin();
   hasSensor = sensor.begin(&wire);
@@ -71,12 +73,12 @@ void setup() {
       wifiConfig.publish("switch/{sensorId}_relay/state", state, true);
     })
     .add("leftLight", LOW, [](int value) {
-      digitalWrite(LEFT_LIGHT, value);
+      digitalWrite(LEFT_LIGHT, !value);
       String state = value ? "ON" : "OFF";
       wifiConfig.publish("switch/{sensorId}_leftLight/state", state, true);
     })
     .add("rightLight", LOW, [](int value) {
-      digitalWrite(RIGHT_LIGHT, value);
+      digitalWrite(RIGHT_LIGHT, !value);
       String state = value ? "ON" : "OFF";
       wifiConfig.publish("switch/{sensorId}_rightLight/state", state, true);
     })
