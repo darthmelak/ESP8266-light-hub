@@ -116,7 +116,7 @@ void setupPeripherals() {
     Serial.println();
   }
 
-  randomSeed(analogRead(analogRead(A0)));
+  randomSeed(analogRead(A0));
 }
 
 void readSensor() {
