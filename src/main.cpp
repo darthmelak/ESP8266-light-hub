@@ -1,10 +1,12 @@
 #include <Arduino.h>
-
 #include <WifiConfig.hpp>
 #include <Wire.h>
 #include <SHT2x.h>
 #include <arduino-timer.h>
 #include <OneButton.h>
+#include <HAswitchHelper.hpp>
+#include <HAlightHelper.hpp>
+#include <HAfanHelper.hpp>
 #include <SerialHandler.hpp>
 #include "secrets.h"
 
@@ -15,25 +17,25 @@
 #define RELAY_PIN D0
 #define PIR_PIN D5
 #define FAN_PIN D8
-#define FAN_BASE 192
+#define FAN_BASE 210
 #define FAN_STEPS 8
 
 bool debug = false;
-TwoWire wire;
 SHT2x sensor;
 Timer<1> timer;
-Configuration outputs("/outputs", debug);
-Configuration inputs("/inputs", debug);
 WifiConfig wifiConfig(WIFI_SSID, WIFI_PASSWORD, "ESP8266 Galeria-Hub", "galeria-hub", AUTH_USER, AUTH_PASS, true, true, debug);
-
-IntConfig *leftLight;
-IntConfig *rightLight;
-IntConfig *PIR;
-OneButton leftButton(LEFT_BUTTON);
 OneButton rightButton(RIGHT_BUTTON);
-int fanSpd = 0;
+OneButton leftButton(LEFT_BUTTON);
+HAswitchHelper relay(wifiConfig, "relay", RELAY_PIN, false, debug);
+HAlightHelper rightLight(wifiConfig, "rightLight", RIGHT_LIGHT, 10, 0, 0, true, debug);
+HAlightHelper leftLight(wifiConfig, "leftLight", LEFT_LIGHT, 10, 0, 0, true, debug);
+HAfanHelper fan(wifiConfig, "fan", FAN_PIN, FAN_STEPS, FAN_BASE, 0, false, debug);
 bool hasSensor = false;
+IntConfig PIR("PIR", 0);
 
+void setupPeripherals();
+void readSensor();
+void lightButtonCb(HAswitchHelper&);
 void serialCb(String);
 
 void setup() {
@@ -42,16 +44,71 @@ void setup() {
     delay(10);
   }
 
+  setupPeripherals();
+
+  PIR.setCb([](int value) {
+    wifiConfig.publish("binary_sensor/{sensorId}_PIR/state", value ? "ON" : "OFF", true);
+  });
+  leftButton.attachClick([]() {
+    lightButtonCb(leftLight);
+  });
+  rightButton.attachClick([]() {
+    lightButtonCb(rightLight);
+  });
+
+  // read sensor every minute
+  if (hasSensor) {
+    timer.every(60000, [](void*) -> bool { readSensor(); return true; });
+  }
+
+  wifiConfig.beginMQTT(
+    MQTT_SERVER,
+    1883,
+    MQTT_USER,
+    MQTT_PASS,
+    "homeassistant/",
+    MQTTConnectProps([]() {
+      relay.onMqttConnect();
+      leftLight.onMqttConnect();
+      rightLight.onMqttConnect();
+      fan.onMqttConnect();
+      wifiConfig.publish("binary_sensor/{sensorId}_PIR/config", wifiConfig.binarySensorConfigPayload("PIR", "motion"), true);
+      if (hasSensor) {
+        wifiConfig.publish("sensor/{sensorId}_temperature/config", wifiConfig.sensorConfigPayload("temperature", "temperature", "°C"), true);
+        wifiConfig.publish("sensor/{sensorId}_humidity/config", wifiConfig.sensorConfigPayload("humidity", "humidity", "%"), true);
+        readSensor();
+      }
+    }, [](const String& topic, const String& data) {
+      relay.onMqttMessage(topic, data);
+      leftLight.onMqttMessage(topic, data);
+      rightLight.onMqttMessage(topic, data);
+      fan.onMqttMessage(topic, data);
+    })
+  );
+  relay.begin();
+  leftLight.begin();
+  rightLight.begin();
+  fan.begin();
+}
+
+void loop() {
+  wifiConfig.loop();
+  handleSerial(debug, serialCb);
+  PIR.setValue(digitalRead(PIR_PIN));
+  leftButton.tick();
+  rightButton.tick();
+  timer.tick();
+  fan.tick();
+  delay(1);
+}
+
+void setupPeripherals() {
   analogWriteFreq(20000);
+  pinMode(A0, INPUT);
   pinMode(PIR_PIN, INPUT);
-  pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LEFT_LIGHT, OUTPUT);
-  digitalWrite(LEFT_LIGHT, HIGH);
-  pinMode(RIGHT_LIGHT, OUTPUT);
-  digitalWrite(RIGHT_LIGHT, HIGH);
-  pinMode(FAN_PIN, OUTPUT);
-  wire.begin();
-  hasSensor = sensor.begin(&wire);
+
+  Wire.begin();
+  hasSensor = sensor.begin(&Wire);
   if (debug) {
     uint8_t stat = sensor.getStatus();
     Serial.print("Sensor status: ");
@@ -59,128 +116,32 @@ void setup() {
     Serial.println();
   }
 
-  inputs
-    .add("PIR", 0, [](int value) {
-      String state = value ? "ON" : "OFF";
-      wifiConfig.publish("binary_sensor/{sensorId}_PIR/state", state, true);
-    });
-  PIR = inputs.getInt("PIR");
-
-  outputs
-    .add("relay", LOW, [](int value) {
-      digitalWrite(RELAY_PIN, value);
-      String state = value ? "ON" : "OFF";
-      wifiConfig.publish("switch/{sensorId}_relay/state", state, true);
-    })
-    .add("leftLight", LOW, [](int value) {
-      digitalWrite(LEFT_LIGHT, !value);
-      String state = value ? "ON" : "OFF";
-      wifiConfig.publish("switch/{sensorId}_leftLight/state", state, true);
-    })
-    .add("rightLight", LOW, [](int value) {
-      digitalWrite(RIGHT_LIGHT, !value);
-      String state = value ? "ON" : "OFF";
-      wifiConfig.publish("switch/{sensorId}_rightLight/state", state, true);
-    })
-    .add("fanState", LOW, [](int value) {
-      if (value == 0) {
-        fanSpd = 0;
-        analogWrite(FAN_PIN, 0);
-      } else {
-        fanSpd = outputs.getInt("fanSpeed")->getIntVal();
-        analogWrite(FAN_PIN, FAN_BASE + fanSpd * FAN_STEPS);
-      }
-      String state = value ? "ON" : "OFF";
-      wifiConfig.publish("fan/{sensorId}_fan/status/state", state, true);
-    })
-    .add("fanSpeed", 1, [](int value) {
-      if (fanSpd != 0) {
-        fanSpd = value;
-        analogWrite(FAN_PIN, FAN_BASE + fanSpd * FAN_STEPS);
-      }
-      wifiConfig.publish("fan/{sensorId}_fan/status/speed", String(value), true);
-    });
-
-  leftLight = outputs.getInt("leftLight");
-  rightLight = outputs.getInt("rightLight");
-  leftButton.attachClick([]() {
-    leftLight->setValue(leftLight->getIntVal() == HIGH ? LOW : HIGH);
-  });
-  rightButton.attachClick([]() {
-    rightLight->setValue(rightLight->getIntVal() == HIGH ? LOW : HIGH);
-  });
-
-  // read sensor every minute
-  timer.every(60000, [](void*) -> bool {
-    if (!hasSensor) return false;
-    if (debug) Serial.println("Reading sensor");
-
-    sensor.read();
-    float temp = sensor.getTemperature();
-    float hum = sensor.getHumidity();
-    wifiConfig.publish("sensor/{sensorId}_temperature/state", String(temp), true);
-    wifiConfig.publish("sensor/{sensorId}_humidity/state", String(hum), true);
-
-    return true;
-  });
-
-  wifiConfig.registerConfigApi(outputs, NULL, false);
-
-  wifiConfig.setupMQTT(
-    MQTT_SERVER,
-    1883,
-    MQTT_USER,
-    MQTT_PASS,
-    "homeassistant/",
-    MQTTConnectProps([]() {
-      wifiConfig.publish("binary_sensor/{sensorId}_PIR/config", wifiConfig.binarySensorConfigPayload("PIR", "motion"), true);
-
-      wifiConfig.publish("switch/{sensorId}_relay/config", wifiConfig.switchConfigPayload("relay"), true);
-      wifiConfig.subscribe("switch/{sensorId}_relay/cmd");
-      wifiConfig.publish("switch/{sensorId}_relay/state", "OFF", true);
-
-      wifiConfig.publish("switch/{sensorId}_leftLight/config", wifiConfig.switchConfigPayload("leftLight"), true);
-      wifiConfig.subscribe("switch/{sensorId}_leftLight/cmd");
-      wifiConfig.publish("switch/{sensorId}_leftLight/state", "OFF", true);
-
-      wifiConfig.publish("switch/{sensorId}_rightLight/config", wifiConfig.switchConfigPayload("rightLight"), true);
-      wifiConfig.subscribe("switch/{sensorId}_rightLight/cmd");
-      wifiConfig.publish("switch/{sensorId}_rightLight/state", "OFF", true);
-
-      wifiConfig.publish("fan/{sensorId}_fan/config", wifiConfig.fanConfigPayload("fan", true, false), true);
-      wifiConfig.subscribe("fan/{sensorId}_fan/cmd/state");
-      wifiConfig.publish("fan/{sensorId}_fan/status/state", "OFF", true);
-      wifiConfig.subscribe("fan/{sensorId}_fan/cmd/speed");
-      wifiConfig.publish("fan/{sensorId}_fan/status/speed", "1", true);
-
-      if (hasSensor) {
-        wifiConfig.publish("sensor/{sensorId}_temperature/config", wifiConfig.sensorConfigPayload("temperature", "temperature", "°C"), true);
-        wifiConfig.publish("sensor/{sensorId}_humidity/config", wifiConfig.sensorConfigPayload("humidity", "humidity", "%"), true);
-      }
-    }, [](String topic, String data) {
-      if (topic == wifiConfig.getPrefixedTopic("switch/{sensorId}_relay/cmd")) {
-        outputs.getInt("relay")->setValue(data == "ON" ? HIGH : LOW);
-      } else if (topic == wifiConfig.getPrefixedTopic("switch/{sensorId}_leftLight/cmd")) {
-        outputs.getInt("leftLight")->setValue(data == "ON" ? HIGH : LOW);
-      } else if (topic == wifiConfig.getPrefixedTopic("switch/{sensorId}_rightLight/cmd")) {
-        outputs.getInt("rightLight")->setValue(data == "ON" ? HIGH : LOW);
-      } else if (topic == wifiConfig.getPrefixedTopic("fan/{sensorId}_fan/cmd/state")) {
-        outputs.getInt("fanState")->setValue(data == "ON" ? HIGH : LOW);
-      } else if (topic == wifiConfig.getPrefixedTopic("fan/{sensorId}_fan/cmd/speed")) {
-        outputs.getInt("fanSpeed")->setValue(data.toInt());
-      }
-    })
-  );
+  randomSeed(analogRead(analogRead(A0)));
 }
 
-void loop() {
-  wifiConfig.loop();
-  handleSerial(debug, serialCb);
-  PIR->setValue(digitalRead(PIR_PIN));
-  leftButton.tick();
-  rightButton.tick();
-  timer.tick();
-  delay(1);
+void readSensor() {
+  if (debug) Serial.println("Reading sensor");
+
+  sensor.read();
+  float temp = sensor.getTemperature();
+  float humi = sensor.getHumidity();
+  wifiConfig.publish("sensor/{sensorId}_temperature/state", String(temp), true);
+  wifiConfig.publish("sensor/{sensorId}_humidity/state", String(humi), true);
+}
+
+void lightButtonCb(HAswitchHelper& light) {
+  IntConfig *state = light.getConfig().getInt("state");
+  IntConfig *level = light.getConfig().getInt("level");
+  if (state->getIntVal()) {
+    if (level->getIntVal() < 255) {
+      level->setValue(255);
+    } else {
+      state->setValue(0);
+    }
+  } else {
+    level->setValue(255);
+    state->setValue(1);
+  }
 }
 
 void serialCb(String cmd) {
